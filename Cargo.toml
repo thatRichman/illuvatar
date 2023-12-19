@@ -1,0 +1,11 @@
+[workspace]
+
+members = [
+  "illuvatar",
+  "samplesheet",
+  "seqdir",
+]
+
+[profile.release]
+opt-level = 3
+#lto = true
