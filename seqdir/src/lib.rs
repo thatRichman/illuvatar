@@ -1,3 +1,4 @@
+use serde::Serialize;
 use std::convert::AsRef;
 use std::ffi::OsStr;
 use std::fs::read_dir;
@@ -7,12 +8,14 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 pub mod manager;
+pub mod run_completion;
 
 const COPY_COMPLETE_TXT: &str = "CopyComplete.txt";
 const RTA_COMPLETE_TXT: &str = "RTAComplete.txt";
 const SEQUENCE_COMPLETE_TXT: &str = "SequenceComplete.txt";
 const SAMPLESHEET_CSV: &str = "SampleSheet.csv";
 const RUN_INFO_XML: &str = "RunInfo.xml";
+const RUN_COMPLETION_STATUS_XML: &str = "RunCompletionStatus.xml";
 const RUN_PARAMS_XML: &str = "RunParameters.xml";
 const LANES: [&str; 4] = ["L001", "L002", "L003", "L004"];
 const BASECALLS: &str = "Data/Intensities/BaseCalls/";
@@ -24,6 +27,7 @@ const BCL_GZ: &str = "bcl.gz";
 const CYCLE_PREFIX: &str = "C";
 
 /// A BCL or a CBCL
+#[derive(Clone, Debug, Serialize)]
 pub enum Bcl {
     Bcl(PathBuf),
     CBcl(PathBuf),
@@ -70,6 +74,7 @@ pub enum SeqDirError {
     ParseIntError(#[from] ParseIntError),
 }
 
+#[derive(Debug, Clone, Serialize)]
 pub struct Cycle {
     cycle_num: u16,
     bcls: Vec<Bcl>,
@@ -107,6 +112,7 @@ impl Cycle {
     }
 }
 
+#[derive(Clone, Debug, Serialize)]
 pub struct Lane<P: AsRef<Path>> {
     cycles: Vec<Cycle>,
     filters: Vec<P>,
@@ -157,35 +163,66 @@ where
     }
 }
 
-pub trait SequencingDirectory {
-    /// Get the root of the sequencing directory.
-    ///
-    /// Returns SeqDirError::NotFound if directory is inaccessible.
-    fn root(&self) -> &Path;
+#[derive(Clone, Debug, Serialize)]
+pub struct SeqDir {
+    root: PathBuf,
+    samplesheet: PathBuf,
+    run_info: PathBuf,
+    run_params: PathBuf,
+    run_completion: PathBuf,
+}
 
+impl SeqDir {
+    /// Create a new SeqDir
+    ///
+    /// Succeeds as long as `path` is readable and is a directory.
+    /// To enforce that the directory is a well-formed, completed sequencing directory, use
+    /// `from_completed`.
+    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, SeqDirError> {
+        if path.as_ref().is_dir() {
+            Ok(SeqDir {
+                root: path.as_ref().to_path_buf(),
+                samplesheet: path.as_ref().join(SAMPLESHEET_CSV),
+                run_info: path.as_ref().join(RUN_INFO_XML),
+                run_params: path.as_ref().join(RUN_PARAMS_XML),
+                run_completion: path.as_ref().join(RUN_COMPLETION_STATUS_XML),
+            })
+        } else {
+            Err(SeqDirError::NotFound(path.as_ref().to_path_buf()))
+        }
+    }
+
+    /// Create a new SeqDir from a completed sequencing directory.
+    ///
+    /// Errors if the sequencing directory is not complete. Completion is determined by the
+    /// presence of the following:
+    /// 1. SampleSheet.csv
+    /// 2. RunInfo.xml
+    /// 3. RunParameters.xml
+    /// 4. CopyComplete.txt
+    pub fn from_completed<P: AsRef<Path>>(path: P) -> Result<Self, SeqDirError> {
+        match detect_illumina_seq_dir(&path) {
+            Ok(()) => Ok(SeqDir::from_path(&path)?),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// get lane data (if any) associated with the sequencing directory
+    ///
+    /// To keep SeqDir lightweight and to support incomplete sequencing runs, lanes are not stored
+    /// within SeqDir.
+    pub fn lanes(&self) -> Result<Vec<Lane<PathBuf>>, SeqDirError> {
+        detect_lanes(&self.root)
+    }
+
+    /// Try to get the root of the sequencing directory.
+    /// Returns SeqDirError::NotFound if directory is inaccessible.
     fn try_root(&self) -> Result<&Path, SeqDirError> {
         self.root()
             .is_dir()
             .then(|| self.root())
             .ok_or_else(|| SeqDirError::NotFound(self.root().to_owned()))
     }
-
-    fn lanes(&self) -> &Vec<Lane<PathBuf>>;
-
-    /// Get the path to SampleSheet.csv
-    ///
-    /// Returns SeqDirError::NotFound if path does not exist or is inaccessible.
-    fn samplesheet(&self) -> Result<&Path, SeqDirError>;
-
-    /// Get the path to RunInfo.xml
-    ///
-    /// Returns SeqDirError::NotFound if path does not exist or is inaccessible.
-    fn run_info(&self) -> Result<&Path, SeqDirError>;
-
-    /// Get the path to RunParameters.xml
-    ///
-    /// Returns SeqDirError::NotFound if path does not exist or is inaccessible.
-    fn run_params(&self) -> Result<&Path, SeqDirError>;
 
     /// Returns true if CopyComplete.txt exists.
     fn is_copy_complete(&self) -> bool {
@@ -228,43 +265,25 @@ pub trait SequencingDirectory {
         self.try_root().is_err()
     }
 
+    /// Attempt to determine if a run has failed sequencing.
+    /// False negatives are possible.
     fn is_failed(&self) -> bool {
         todo!()
     }
 
-    fn check_for_failure(&self) -> bool {
-        todo!()
-    }
-
     /// Returns true if SequenceComplete.txt is not missing
+    /// Convenience method, inverts `is_sequence_complete`
     fn is_sequencing(&self) -> bool {
         !self.is_sequence_complete()
     }
-}
 
-pub struct SeqDir {
-    root: PathBuf,
-    samplesheet: PathBuf,
-    run_info: PathBuf,
-    run_params: PathBuf,
-    lanes: Vec<Lane<PathBuf>>,
-}
-
-impl SeqDir {
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<Self, SeqDirError> {
-        detect_illumina_seq_dir(path)
-    }
-}
-
-impl SequencingDirectory for SeqDir {
     fn root(&self) -> &Path {
         &self.root
     }
 
-    fn lanes(&self) -> &Vec<Lane<PathBuf>> {
-        &self.lanes
-    }
-
+    /// Get the path to SampleSheet.csv
+    ///
+    /// Returns SeqDirError::NotFound if path does not exist or is inaccessible.
     fn samplesheet(&self) -> Result<&Path, SeqDirError> {
         self.samplesheet
             .is_file()
@@ -272,6 +291,9 @@ impl SequencingDirectory for SeqDir {
             .ok_or_else(|| SeqDirError::NotFound(self.samplesheet.clone()))
     }
 
+    /// Get the path to RunInfo.xml
+    ///
+    /// Returns SeqDirError::NotFound if path does not exist or is inaccessible.
     fn run_info(&self) -> Result<&Path, SeqDirError> {
         self.run_info
             .is_file()
@@ -279,252 +301,82 @@ impl SequencingDirectory for SeqDir {
             .ok_or_else(|| SeqDirError::NotFound(self.run_info.clone()))
     }
 
+    /// Get the path to RunParameters.xml
+    ///
+    /// Returns SeqDirError::NotFound if path does not exist or is inaccessible.
     fn run_params(&self) -> Result<&Path, SeqDirError> {
         self.run_params
             .is_file()
             .then(|| self.run_params.as_path())
             .ok_or_else(|| SeqDirError::NotFound(self.run_params.clone()))
     }
-}
 
-/// Like SeqDir, except every path field other than `root` is an Option.
-/// Additionally, `lanes` field may be <= 4, and incomplete lanes are excluded.
-pub struct IncompleteSeqDir {
-    root: PathBuf,
-    samplesheet: Option<PathBuf>,
-    run_info: Option<PathBuf>,
-    run_params: Option<PathBuf>,
-    lanes: Vec<Lane<PathBuf>>,
-}
-
-impl IncompleteSeqDir {
-    pub fn from_path<P: AsRef<Path>>(path: P) -> Result<IncompleteSeqDir, SeqDirError> {
-        detect_incomplete_illumina_seq_dir(path)
+    /// Get the path to RunCompletionStatus.xml
+    /// Returns Option because not all illumina sequencers generate this file.
+    fn run_completion_status(&self) -> Option<&Path> {
+        self.run_completion
+            .is_file()
+            .then(|| self.run_completion.as_path())
+            .or(None)
     }
 }
 
-impl SequencingDirectory for IncompleteSeqDir {
-    fn root(&self) -> &Path {
-        &self.root
-    }
-
-    fn lanes(&self) -> &Vec<Lane<PathBuf>> {
-        &self.lanes
-    }
-
-    fn samplesheet(&self) -> Result<&Path, SeqDirError> {
-        match self.samplesheet.as_ref() {
-            None => Err(SeqDirError::IncompleteNotFound),
-            Some(p) => p
-                .is_file()
-                .then(|| p.as_path())
-                .ok_or_else(|| SeqDirError::NotFound(p.clone())),
-        }
-    }
-
-    fn run_info(&self) -> Result<&Path, SeqDirError> {
-        match self.run_info.as_ref() {
-            None => Err(SeqDirError::IncompleteNotFound),
-            Some(p) => p
-                .is_file()
-                .then(|| p.as_path())
-                .ok_or_else(|| SeqDirError::NotFound(p.clone())),
-        }
-    }
-
-    fn run_params(&self) -> Result<&Path, SeqDirError> {
-        match self.run_params.as_ref() {
-            None => Err(SeqDirError::IncompleteNotFound),
-            Some(p) => p
-                .is_file()
-                .then(|| p.as_path())
-                .ok_or_else(|| SeqDirError::NotFound(p.clone())),
-        }
-    }
-}
-
-impl TryFrom<IncompleteSeqDir> for SeqDir {
-    type Error = SeqDirError;
-    /// Given an IncompleteSeqDir, attempt to construct a
-    /// SeqDir by running `detect_illumina_seq_dir` on the root.
-    fn try_from(value: IncompleteSeqDir) -> Result<Self, Self::Error> {
-        detect_illumina_seq_dir(value.root)
-    }
-}
-
-/// Given a directory, detect whether it appears to be a complete Illumina sequencing directory.
-/// If so, construct a SeqDir struct. Otherwise, raise a SeqDirError.
-///
-/// If you need to manage a sequencing directory that may be incomplete or malformed,
-/// see IncompleteSeqDir and detect_incomplete_illumina_seq_dir.
-pub fn detect_illumina_seq_dir<P: AsRef<Path>>(dir: P) -> Result<SeqDir, SeqDirError> {
-    dir.as_ref().try_exists()?;
-    if !dir.as_ref().is_dir() {
-        return Err(SeqDirError::IoError(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "sequencing directory must be a directory",
-        )));
-    }
-    if !dir.as_ref().join(COPY_COMPLETE_TXT).exists() {
-        return Err(SeqDirError::NotFound(dir.as_ref().join(COPY_COMPLETE_TXT)));
-    }
-    let samplesheet = dir.as_ref().join(SAMPLESHEET_CSV);
-    samplesheet
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(samplesheet.clone()))?;
-    let run_info = dir.as_ref().join(RUN_INFO_XML);
-    run_info
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(run_info.clone()))?;
-
-    let run_params = dir.as_ref().join(RUN_PARAMS_XML);
-    run_params
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(run_params.clone()))?;
-
-    let lanes = LANES
+/// Find outputs per-lane for a sequencing directory and construct `Lane` objects
+/// Will only find lanes 'L001' - 'L004', because those are the only ones that should exist.
+fn detect_lanes<P: AsRef<Path>>(dir: P) -> Result<Vec<Lane<PathBuf>>, SeqDirError> {
+    LANES
         .iter()
         .map(|l| dir.as_ref().join(BASECALLS).join(l))
         .filter(|l| l.exists())
         .map(|l| Lane::from_path(dir.as_ref().join(l)))
-        .collect::<Result<Vec<Lane<PathBuf>>, SeqDirError>>()?;
-    match lanes.len() {
-        2 | 4 => {}
-        x if x <= 1 || x == 3 => return Err(SeqDirError::MissingLanes(x)),
-        x => return Err(SeqDirError::TooManyLanes(x)),
-    }
-
-    Ok(SeqDir {
-        root: PathBuf::from(dir.as_ref()),
-        samplesheet,
-        run_info,
-        run_params,
-        lanes,
-    })
+        .collect::<Result<Vec<Lane<PathBuf>>, SeqDirError>>()
 }
 
-/// Given a directory, detect whether it appears to be a (possibly incomplete) Illumina sequencing directory.
-/// If so, construct an IncompleteSeqDir struct. Otherwise, raise a SeqDirError.
-///
-/// To instead raise an error if the directory appears incomplete, see SeqDir and
-/// detect_illumina_seq_dir.
-pub fn detect_incomplete_illumina_seq_dir<P: AsRef<Path>>(
-    dir: P,
-) -> Result<IncompleteSeqDir, SeqDirError> {
+/// Given a directory, determine if it appears to be a complete Illumina sequencing directory.
+pub fn detect_illumina_seq_dir<P: AsRef<Path>>(dir: P) -> Result<(), SeqDirError> {
     dir.as_ref().try_exists()?;
     if !dir.as_ref().is_dir() {
         return Err(SeqDirError::IoError(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "sequencing directory must be a directory",
+            "dir must be a directory",
         )));
     }
-    let samplesheet_path = dir.as_ref().join(SAMPLESHEET_CSV);
-    let samplesheet = match samplesheet_path.try_exists().ok() {
-        None => None,
-        Some(_) => Some(samplesheet_path),
-    };
-    let run_info_path = dir.as_ref().join(RUN_INFO_XML);
-    let run_info = match run_info_path.try_exists().ok() {
-        None => None,
-        Some(_) => Some(run_info_path),
-    };
-    let run_params_path = dir.as_ref().join(RUN_PARAMS_XML);
-    let run_params = match run_params_path.try_exists().ok() {
-        None => None,
-        Some(_) => Some(run_params_path),
-    };
+    dir.as_ref()
+        .join(COPY_COMPLETE_TXT)
+        .try_exists()
+        .map_err(|_| SeqDirError::NotFound(Path::new(SAMPLESHEET_CSV).to_owned()))?;
+    dir.as_ref()
+        .join(SAMPLESHEET_CSV)
+        .try_exists()
+        .map_err(|_| SeqDirError::NotFound(Path::new(SAMPLESHEET_CSV).to_owned()))?;
+    dir.as_ref()
+        .join(RUN_INFO_XML)
+        .try_exists()
+        .map_err(|_| SeqDirError::NotFound(Path::new(RUN_INFO_XML).to_owned()))?;
+    dir.as_ref()
+        .join(RUN_PARAMS_XML)
+        .try_exists()
+        .map_err(|_| SeqDirError::NotFound(Path::new(RUN_PARAMS_XML).to_owned()))?;
 
-    let lanes = LANES
-        .iter()
-        .map(|l| dir.as_ref().join(BASECALLS).join(l))
-        .filter(|l| l.exists())
-        .map(|l| Lane::from_path(dir.as_ref().join(l)))
-        .filter(|l| l.is_ok())
-        .collect::<Result<Vec<Lane<PathBuf>>, SeqDirError>>()?;
-    match lanes.len() {
-        x if x > 4 => return Err(SeqDirError::TooManyLanes(x)),
-        _ => {}
-    }
-
-    Ok(IncompleteSeqDir {
-        root: PathBuf::from(dir.as_ref()),
-        samplesheet,
-        run_info,
-        run_params,
-        lanes,
-    })
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
 
-    #[test]
-    fn cbcl() {
-        unimplemented!()
-    }
+    use crate::{detect_illumina_seq_dir, SeqDir, SeqDirError};
+
+    const COMPLETE: &str = "test_data/seq_complete/";
+    const FAILED: &str = "test_data/seq_failed/";
+    const TRANSFERRING: &str = "test_data/seq_transferring/";
 
     #[test]
-    fn bcl() {
-        unimplemented!()
-    }
-
-    #[test]
-    fn good_bcl() {
-        unimplemented!()
-    }
-
-    #[test]
-    fn bad_bcl() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn good_cycle() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn bad_cycle() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn good_lane() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn bad_lane() {
-        unimplemented!()
-    }
-
-    #[test]
-    fn good_seqdir() {
-        unimplemented!()
-    }
-
-    #[test]
-    fn bad_seqdir() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn good_incomplete_seqdir() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn bad_incomplete_seqdir() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn good_transition() {
-        unimplemented!();
-    }
-
-    #[test]
-    fn bad_transition() {
-        unimplemented!();
+    fn complete_seqdir() -> Result<(), SeqDirError> {
+        let seq_dir =
+            detect_illumina_seq_dir(&COMPLETE).and_then(|_| SeqDir::from_path(&COMPLETE))?;
+        seq_dir.samplesheet()?;
+        seq_dir.run_info()?;
+        seq_dir.run_params()?;
+        Ok(())
     }
 }

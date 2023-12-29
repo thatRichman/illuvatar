@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+chrono = { version = "0.4.31", features = ["serde"] }
 log = { version = "0.4.20", features = ["release_max_level_trace"] }
+roxmltree = "0.19.0"
+serde = { version = "1.0.193", features = ["derive"] }
 thiserror = "1.0.50"
 
