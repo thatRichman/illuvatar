@@ -99,7 +99,7 @@ impl Cycle {
         let bcls: Vec<Bcl> = read_dir(path)?
             .filter_map(|c| c.ok())
             .map(|c| c.path())
-            .filter_map(|c| Bcl::from_path(&c))
+            .filter_map(Bcl::from_path)
             .collect();
         if bcls.is_empty() {
             return Err(SeqDirError::MissingBcls(cycle_num));
@@ -136,13 +136,13 @@ where
                     && p.file_name()
                         .unwrap_or_else(|| OsStr::new(""))
                         .to_str()
-                        .unwrap_or_else(|| "")
+                        .unwrap_or("")
                         .starts_with(CYCLE_PREFIX)
             });
 
         let cycles: Vec<Cycle> = cycle_paths
             .iter()
-            .map(|c| Cycle::from_path(c))
+            .map(Cycle::from_path)
             .collect::<Result<Vec<Cycle>, SeqDirError>>()?;
         if cycles.is_empty() {
             return Err(SeqDirError::MissingCycles);
@@ -152,8 +152,7 @@ where
             .iter()
             .filter(|p| {
                 p.is_file() && p.extension().unwrap_or_else(|| OsStr::new("")) == FILTER_EXT
-            })
-            .map(|p| p.clone())
+            }).cloned()
             .collect();
 
         Ok(Lane { cycles, filters })
@@ -288,7 +287,7 @@ impl SeqDir {
 
     /// Attempt to parse RunCompletionStatus.xml and return a `CompletionStatus`
     fn get_completion_status(&self) -> Option<Result<CompletionStatus, SeqDirError>> {
-        Some(parse_run_completion(&self.run_completion_status()?).map_err(|e| SeqDirError::from(e)))
+        Some(parse_run_completion(self.run_completion_status()?).map_err(SeqDirError::from))
     }
 
     /// Attempt to determine if a run has failed sequencing.
@@ -322,7 +321,7 @@ impl SeqDir {
     fn samplesheet(&self) -> Result<&Path, SeqDirError> {
         self.samplesheet
             .is_file()
-            .then(|| self.samplesheet.as_path())
+            .then_some(self.samplesheet.as_path())
             .ok_or_else(|| SeqDirError::NotFound(self.samplesheet.clone()))
     }
 
@@ -332,7 +331,7 @@ impl SeqDir {
     fn run_info(&self) -> Result<&Path, SeqDirError> {
         self.run_info
             .is_file()
-            .then(|| self.run_info.as_path())
+            .then_some(self.run_info.as_path())
             .ok_or_else(|| SeqDirError::NotFound(self.run_info.clone()))
     }
 
@@ -342,7 +341,7 @@ impl SeqDir {
     fn run_params(&self) -> Result<&Path, SeqDirError> {
         self.run_params
             .is_file()
-            .then(|| self.run_params.as_path())
+            .then_some(self.run_params.as_path())
             .ok_or_else(|| SeqDirError::NotFound(self.run_params.clone()))
     }
 
@@ -352,7 +351,7 @@ impl SeqDir {
     fn run_completion_status(&self) -> Option<&Path> {
         self.run_completion
             .is_file()
-            .then(|| self.run_completion.as_path())
+            .then_some(self.run_completion.as_path())
             .or(None)
     }
 }

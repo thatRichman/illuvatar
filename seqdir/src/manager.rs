@@ -241,7 +241,7 @@ impl DirManager {
 
     /// Reference to the inner SeqDir being managed
     pub fn inner(&self) -> &SeqDir {
-        &self.seq_dir.dir()
+        self.seq_dir.dir()
     }
 
     /// Mutable reference to inner SeqDir being managed
@@ -257,7 +257,7 @@ impl DirManager {
     }
 
     /// Check if the contained SeqDir should be moved to a new state, and transition if so
-    pub fn poll<'a>(&'a mut self) -> &'a SeqDirState {
+    pub fn poll(&mut self) -> &SeqDirState {
         *self = match std::mem::replace(&mut self.seq_dir, _default()) {
             SeqDirState::Available(dir) => {
                 if dir.seq_dir.try_root().is_err() {
