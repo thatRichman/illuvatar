@@ -1,3 +1,4 @@
+use run_completion::CompletionStatus;
 use serde::Serialize;
 use std::convert::AsRef;
 use std::ffi::OsStr;
@@ -9,6 +10,8 @@ use thiserror::Error;
 
 pub mod manager;
 pub mod run_completion;
+
+use crate::run_completion::parse_run_completion;
 
 const COPY_COMPLETE_TXT: &str = "CopyComplete.txt";
 const RTA_COMPLETE_TXT: &str = "RTAComplete.txt";
@@ -72,6 +75,8 @@ pub enum SeqDirError {
     BadCycle(PathBuf),
     #[error(transparent)]
     ParseIntError(#[from] ParseIntError),
+    #[error("unexpected run completion status: {0}")]
+    CompletionStatus(CompletionStatus),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,9 +171,13 @@ where
 #[derive(Clone, Debug, Serialize)]
 pub struct SeqDir {
     root: PathBuf,
+    #[serde(skip)]
     samplesheet: PathBuf,
+    #[serde(skip)]
     run_info: PathBuf,
+    #[serde(skip)]
     run_params: PathBuf,
+    #[serde(skip)]
     run_completion: PathBuf,
 }
 
@@ -195,16 +204,28 @@ impl SeqDir {
     /// Create a new SeqDir from a completed sequencing directory.
     ///
     /// Errors if the sequencing directory is not complete. Completion is determined by the
-    /// presence of the following:
-    /// 1. SampleSheet.csv
-    /// 2. RunInfo.xml
-    /// 3. RunParameters.xml
-    /// 4. CopyComplete.txt
+    /// following:
+    /// 1. CopyComplete.txt is present
+    /// 2. RunCompletionStatus (if present) is CompletedAsPlanned
     pub fn from_completed<P: AsRef<Path>>(path: P) -> Result<Self, SeqDirError> {
-        match detect_illumina_seq_dir(&path) {
-            Ok(()) => Ok(SeqDir::from_path(&path)?),
-            Err(e) => Err(e),
-        }
+        let seq_dir = Self::from_path(&path)?;
+        seq_dir
+            .is_copy_complete()
+            .then(|| Ok::<(), SeqDirError>(()))
+            .ok_or_else(|| SeqDirError::NotFound(seq_dir.root().join(COPY_COMPLETE_TXT)))??;
+
+        // If RunCompletionStatus exists, verify it, but cannot rely on this
+        // since not all platforms output this file
+        match seq_dir.get_completion_status() {
+            None => {}
+            Some(Ok(status)) => match status {
+                CompletionStatus::CompletedAsPlanned(..) => {}
+                _ => return Err(SeqDirError::CompletionStatus(status)),
+            },
+            Some(Err(e)) => return Err(e),
+        };
+
+        Ok(seq_dir)
     }
 
     /// get lane data (if any) associated with the sequencing directory
@@ -260,23 +281,37 @@ impl SeqDir {
         self.try_root().is_ok()
     }
 
-    // Returns true if the root directory is *not* readable
+    // Returns true if the root directory cannot be read
     fn is_unavailable(&self) -> bool {
         self.try_root().is_err()
     }
 
-    /// Attempt to determine if a run has failed sequencing.
-    /// False negatives are possible.
-    fn is_failed(&self) -> bool {
-        todo!()
+    /// Attempt to parse RunCompletionStatus.xml and return a `CompletionStatus`
+    fn get_completion_status(&self) -> Option<Result<CompletionStatus, SeqDirError>> {
+        Some(parse_run_completion(&self.run_completion_status()?).map_err(|e| SeqDirError::from(e)))
     }
 
-    /// Returns true if SequenceComplete.txt is not missing
+    /// Attempt to determine if a run has failed sequencing.
+    /// Uses RunCompletionStatus.xml. If RunCompletionStatus is not available, returns false.
+    /// unlike other `is_` library methods, this is fallible because it must parse a file.
+    fn is_failed(&self) -> Result<bool, SeqDirError> {
+        match self.get_completion_status() {
+            None => Ok(false),
+            Some(Err(e)) => Err(e),
+            Some(Ok(res)) => match res {
+                CompletionStatus::CompletedAsPlanned(..) => Ok(false),
+                _ => Ok(true),
+            },
+        }
+    }
+
+    /// Returns true if SequenceComplete.txt is not present
     /// Convenience method, inverts `is_sequence_complete`
     fn is_sequencing(&self) -> bool {
         !self.is_sequence_complete()
     }
 
+    /// Returns reference to seqdir root
     fn root(&self) -> &Path {
         &self.root
     }
@@ -313,6 +348,7 @@ impl SeqDir {
 
     /// Get the path to RunCompletionStatus.xml
     /// Returns Option because not all illumina sequencers generate this file.
+    /// To actually parse RunCompletionStatus.xml, see `get_completion_status`
     fn run_completion_status(&self) -> Option<&Path> {
         self.run_completion
             .is_file()
@@ -332,51 +368,59 @@ fn detect_lanes<P: AsRef<Path>>(dir: P) -> Result<Vec<Lane<PathBuf>>, SeqDirErro
         .collect::<Result<Vec<Lane<PathBuf>>, SeqDirError>>()
 }
 
-/// Given a directory, determine if it appears to be a complete Illumina sequencing directory.
-pub fn detect_illumina_seq_dir<P: AsRef<Path>>(dir: P) -> Result<(), SeqDirError> {
-    dir.as_ref().try_exists()?;
-    if !dir.as_ref().is_dir() {
-        return Err(SeqDirError::IoError(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "dir must be a directory",
-        )));
-    }
-    dir.as_ref()
-        .join(COPY_COMPLETE_TXT)
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(Path::new(SAMPLESHEET_CSV).to_owned()))?;
-    dir.as_ref()
-        .join(SAMPLESHEET_CSV)
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(Path::new(SAMPLESHEET_CSV).to_owned()))?;
-    dir.as_ref()
-        .join(RUN_INFO_XML)
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(Path::new(RUN_INFO_XML).to_owned()))?;
-    dir.as_ref()
-        .join(RUN_PARAMS_XML)
-        .try_exists()
-        .map_err(|_| SeqDirError::NotFound(Path::new(RUN_PARAMS_XML).to_owned()))?;
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
 
-    use crate::{detect_illumina_seq_dir, SeqDir, SeqDirError};
+    use crate::{SeqDir, SeqDirError};
 
     const COMPLETE: &str = "test_data/seq_complete/";
     const FAILED: &str = "test_data/seq_failed/";
     const TRANSFERRING: &str = "test_data/seq_transferring/";
+    const SEQUENCING: &str = "test_data/seq_sequencing/";
 
     #[test]
-    fn complete_seqdir() -> Result<(), SeqDirError> {
-        let seq_dir =
-            detect_illumina_seq_dir(&COMPLETE).and_then(|_| SeqDir::from_path(&COMPLETE))?;
-        seq_dir.samplesheet()?;
-        seq_dir.run_info()?;
-        seq_dir.run_params()?;
-        Ok(())
+    fn complete_seqdir() {
+        let seq_dir = SeqDir::from_completed(&COMPLETE).unwrap();
+        seq_dir.samplesheet().unwrap();
+        seq_dir.run_info().unwrap();
+        seq_dir.run_params().unwrap();
+        assert!(seq_dir.is_available());
+        assert!(seq_dir.is_sequence_complete());
+        assert!(seq_dir.is_copy_complete());
+        assert!(seq_dir.is_rta_complete());
+        assert!(!seq_dir.is_sequencing());
+        assert!(seq_dir.lanes().is_ok())
+    }
+
+    #[test]
+    fn failed_seqdir() {
+        let seq_dir = SeqDir::from_path(&FAILED).unwrap();
+        assert!(seq_dir.is_failed().unwrap());
+        assert!(matches!(
+            SeqDir::from_completed(&FAILED),
+            Err(SeqDirError::CompletionStatus(..))
+        ));
+    }
+
+    #[test]
+    fn transferring_seqdir() {
+        let seq_dir = SeqDir::from_path(&TRANSFERRING).unwrap();
+        assert!(seq_dir.is_available());
+        assert!(seq_dir.is_sequence_complete());
+        assert!(!seq_dir.is_sequencing());
+        assert!(!seq_dir.is_failed().unwrap());
+        assert!(!seq_dir.is_copy_complete());
+        assert!(seq_dir.is_rta_complete());
+    }
+    
+    #[test]
+    fn sequencing_seqdir() {
+        let seq_dir = SeqDir::from_path(&SEQUENCING).unwrap();
+        assert!(seq_dir.is_available());
+        assert!(!seq_dir.is_sequence_complete());
+        assert!(seq_dir.is_sequencing());
+        assert!(!seq_dir.is_failed().unwrap());
+        assert!(!seq_dir.is_copy_complete());
+        assert!(seq_dir.is_rta_complete());
     }
 }
