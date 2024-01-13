@@ -167,6 +167,7 @@ impl From<TransferringSeqDir> for FailedSeqDir {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(tag="status")]
 pub enum SeqDirState {
     Available(AvailableSeqDir),
     Transferring(TransferringSeqDir),

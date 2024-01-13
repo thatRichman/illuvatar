@@ -3,12 +3,13 @@ use std::path::Path;
 use std::{fs::File, io::Read};
 
 use roxmltree;
+use serde::Serialize;
 
 const RUN_ID: &str = "RunId";
 const COMPLETION_STATUS: &str = "CompletionStatus";
 const ERROR_DESCRIPTION: &str = "ErrorDescription";
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Message {
     pub run_id: String,
     pub message: Option<String>,
@@ -26,7 +27,8 @@ impl Display for Message {
 }
 
 #[non_exhaustive]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag="completion_status")]
 pub enum CompletionStatus {
     CompletedAsPlanned(Message),
     ExceptionEndedEarly(Message),
@@ -150,5 +152,14 @@ mod tests {
     #[test]
     fn bad_message_does_not_panic() {
         assert!(parse_run_completion(&GARBAGE_RCS).is_err());
+    }
+
+    #[test]
+    fn test_serialize() {
+        use serde_json;
+
+        let completion_status = parse_run_completion(&COMPLETED_RCS).unwrap();
+        let serialized = serde_json::to_string(&completion_status).unwrap();
+        println!("{:#?}", serialized);
     }
 }
