@@ -471,6 +471,6 @@ mod tests {
         };
         manager.poll();
 
-        println!("{:#?}", serde_json::to_string(manager.state()).unwrap());
+        serde_json::to_string(manager.state()).unwrap();
     }
 }

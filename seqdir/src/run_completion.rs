@@ -159,7 +159,6 @@ mod tests {
         use serde_json;
 
         let completion_status = parse_run_completion(&COMPLETED_RCS).unwrap();
-        let serialized = serde_json::to_string(&completion_status).unwrap();
-        println!("{:#?}", serialized);
+        serde_json::to_string(&completion_status).unwrap();
     }
 }
